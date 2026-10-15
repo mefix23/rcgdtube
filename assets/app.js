@@ -1,6 +1,8 @@
 // РКГДTUBE — сайт читает data/posts.json, который обновляет GitHub каждые 15 минут.
 const CHANNEL = "RCGDTUBE";
 const PAGE = 24;
+// хэштеги, которые не показываем кнопками вверху
+const HIDDEN_TAGS = ["renphix_строитель", "preview", "gameplay"];
 let POSTS = [], UPDATED = null, filter = "all", query = "", shown = PAGE;
 
 const $ = s => document.querySelector(s);
@@ -116,7 +118,8 @@ function route() { const m = location.hash.match(/^#v(\d+)$/); m ? watch(m[1]) :
 function chips() {
   const count = {};
   POSTS.forEach(p => p.tags.forEach(t => count[t] = (count[t] || 0) + 1));
-  const top = Object.entries(count).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t]) => [t, "#" + t]);
+  const top = Object.entries(count).filter(([t]) => !HIDDEN_TAGS.includes(t.toLowerCase()))
+    .sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t]) => [t, "#" + t]);
   const all = [["all", "Все"], ["video", "Видео"], ["photo", "Фото"], ...top];
   $("#chips").innerHTML = all.map(([k, l]) => `<button class="chip" data-k="${esc(k)}" aria-pressed="${k === filter}">${esc(l)}</button>`).join("");
 }
