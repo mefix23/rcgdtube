@@ -1,0 +1,51 @@
+# Каждые 15 минут забирает новые посты из канала и обновляет сайт.
+name: Обновить сайт
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: update-site
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Забрать новые посты
+        run: |
+          pip install requests==2.32.3 beautifulsoup4==4.12.3
+          python scripts/fetch_posts.py
+
+      - name: Сохранить новые посты в репозиторий
+        run: |
+          git config user.name "rcgdtube-bot"
+          git config user.email "rcgdtube-bot@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "Новые посты из канала"
+          git push
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+      - id: deploy
+        uses: actions/deploy-pages@v4
