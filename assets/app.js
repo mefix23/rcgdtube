@@ -88,16 +88,24 @@ function fromSubmission(s) {
     short: s.is_short, approved: true,
   };
 }
+// свежий пост из канала (таблица channel_posts — обновляется каждые 5 минут)
+function fromChannel(r) {
+  const author = r.author || "Неизвестный автор";
+  return { key: r.yt, yt: r.yt, tg: r.tg, title: r.title || "Ворк от " + author, author, desc: r.descr || "",
+    date: r.posted_at || r.scanned_at, short: !!r.short };
+}
 async function loadData() {
   const d = await fetch("data/posts.json?t=" + Math.floor(Date.now() / 60000)).then(r => r.json());
   S.meta = d;
   if (sb) {
-    const [h, a] = await Promise.all([
+    const [h, a, c] = await Promise.all([
       sb.from("hidden_videos").select("video_key"),
       sb.from("submissions").select("*").eq("status", "approved").order("reviewed_at", { ascending: false }).limit(500),
+      sb.from("channel_posts").select("*").order("tg", { ascending: false }).limit(150),
     ]);
     (h.data || []).forEach(x => S.hidden.add(x.video_key));
     (d.posts || []).forEach(addPost);
+    (c.data || []).forEach(r => addPost(fromChannel(r)));
     (a.data || []).forEach(s => addPost(fromSubmission(s)));
   } else (d.posts || []).forEach(addPost);
   S.posts.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
