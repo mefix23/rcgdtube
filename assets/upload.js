@@ -84,17 +84,18 @@ $("#addForm").addEventListener("submit", async e => {
   const id = youtubeId($("#url").value);
   if (!id) return say(msg, "Это не похоже на ссылку на видео YouTube. Пример: https://youtu.be/fJP5DtkLl_k", "err");
   const title = $("#title").value.trim(), author = $("#author").value.trim();
+  const desc = $("#desc").value.trim(), tags = $("#tags").value.trim();
   busy(btn, true); say(msg, "Выкладываю…");
   try {
     let dup = false;
     const d = await changeUploads(data => {
       if (data.videos.some(v => v.yt === id)) { dup = true; return; }
-      data.videos.push({ id: crypto.randomUUID(), yt: id, title, author, added: new Date().toISOString(), by: KEY_NO });
+      data.videos.push({ id: crypto.randomUUID(), yt: id, title, author, desc, tags, added: new Date().toISOString(), by: KEY_NO });
       data.hidden = data.hidden.filter(x => x !== id);
     }, `Добавлено видео ${id} (ключ №${KEY_NO})`);
     if (dup) say(msg, "Это видео уже добавлено.", "err");
     else {
-      say(msg, "Готово! Видео появится на сайте в течение пары минут.", "ok");
+      say(msg, "Готово! Видео появится на сайте через пару минут, а в Telegram-канале — в течение 15 минут.", "ok");
       $("#addForm").reset(); $("#preview").hidden = true;
     }
     render(d);
