@@ -14,6 +14,16 @@
 // Настройка функции: «Verify JWT» выключить (функция сама проверяет, кто пишет).
 import { createClient } from "npm:@supabase/supabase-js@2.45.4";
 
+// Ключ с полными правами: новый (sb_secret_…) или старый service_role — что есть в проекте.
+function serviceKey(): string {
+  try {
+    const j = JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") || "{}");
+    const v = j.default || Object.values(j)[0];
+    if (typeof v === "string" && v) return v;
+  } catch (_) { /* старый формат */ }
+  return Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+}
+
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -29,7 +39,7 @@ const BOT_ID = Number(BOT.split(":")[0] || 0);
 const CHANNEL = (Deno.env.get("TG_CHANNEL") || "RCGDTUBE").replace(/^@/, "").toLowerCase();
 const SITE = Deno.env.get("SITE_URL") || "https://mefix23.github.io/rcgdtube/";
 const URL_SELF = `${Deno.env.get("SUPABASE_URL")}/functions/v1/tg-bridge`;
-const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
+const admin = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey(), {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
