@@ -104,7 +104,8 @@ async function loadData() {
       sb.from("channel_posts").select("*").order("tg", { ascending: false }).limit(150),
     ]);
     (h.data || []).forEach(x => S.hidden.add(x.video_key));
-    (d.posts || []).forEach(addPost);
+    const live = a.error || (a.data || []).length >= 500 ? null : new Set((a.data || []).map(s => fromSubmission(s).key));
+    (d.posts || []).forEach(p => { if (!(live && p.approved && !live.has(p.key))) addPost(p); });
     (c.data || []).forEach(r => addPost(fromChannel(r)));
     (a.data || []).forEach(s => addPost(fromSubmission(s)));
   } else (d.posts || []).forEach(addPost);
@@ -459,7 +460,7 @@ function loginWall(title, text) {
 }
 
 // ---------- профиль ----------
-const TABS = [["history", "История"], ["liked", "Понравившиеся"], ["mine", "Мои заявки"], ["subs", "Подписки"]];
+const TABS = [["history", "История"], ["liked", "Понравившиеся"], ["mine", "Мои видео"], ["subs", "Подписки"]];
 async function you(tab) {
   if (!S.profile) return loginWall("Твой профиль", "Войди через Telegram, чтобы видеть историю, понравившиеся видео и отправлять свои ворки.");
   const tabs = TABS.slice();
@@ -470,7 +471,7 @@ async function you(tab) {
   $("#app").innerHTML = `<div class="wrap" style="max-width:1300px">
     <section class="ch-head">${userAv(S.profile, 120)}<div><h1>${esc(S.profile.name)}${roleName ? `<span class="role">${roleName}</span>` : ""}</h1>
       <p>${S.profile.username ? "@" + esc(S.profile.username) + " · " : ""}на РКГДTUBE с ${new Date(S.profile.created_at).toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" })}</p>
-      <div class="row"><button class="btn hot" type="button" id="youCreate">Отправить видео</button><button class="btn" type="button" id="logout">Выйти</button></div></div></section>
+      <div class="row"><button class="btn hot" type="button" id="youCreate">Добавить видео</button><button class="btn" type="button" id="logout">Выйти</button></div></div></section>
     <nav class="tabs">${tabs.map(([k, l]) => `<a href="#/you/${k}" class="${k === tab ? "on" : ""}">${l}</a>`).join("")}</nav>
     <div id="tab"><p class="muted">Загружаю…</p></div>
     ${isMod() ? "" : `<details class="panel" style="margin-top:28px"><summary style="cursor:pointer;font-weight:800">Есть код модератора?</summary>
@@ -511,6 +512,8 @@ async function tabSubs(box) {
   $$("[data-sub]", box).forEach(b => b.onclick = async () => { await toggleSub(b.dataset.sub, b.dataset.name); tabSubs(box); });
 }
 const STATUS = { pending: "На проверке", approved: "Выложено", rejected: "Отказано" };
+const statusText = s => s.status === "approved" ? (s.target === "site" ? "На сайте" : "В канале") : STATUS[s.status];
+function dropPost(key) { S.byKey.delete(key); const i = S.posts.findIndex(p => p.key === key); if (i >= 0) S.posts.splice(i, 1); }
 function subThumb(s) {
   if (s.thumb_path) return storageUrl(s.thumb_path);
   return s.yt_id ? `https://i.ytimg.com/vi/${s.yt_id}/mqdefault.jpg` : "media/logo.jpg";
@@ -518,20 +521,22 @@ function subThumb(s) {
 async function tabMine(box) {
   const { data, error } = await sb.from("submissions").select("*").eq("user_id", S.user.id).order("created_at", { ascending: false });
   if (error) { box.innerHTML = `<p class="msg err">${esc(errText(error))}</p>`; return; }
-  box.innerHTML = `<div class="row" style="margin-bottom:16px"><button class="btn hot" type="button" id="mineNew">Отправить видео</button></div>`
+  box.innerHTML = `<div class="row" style="margin-bottom:16px"><button class="btn hot" type="button" id="mineNew">Добавить видео</button></div>`
     + (data.length ? `<div class="items">${data.map(s => `<div class="item"><div class="thumb${s.is_short ? " vertical" : ""}"><img src="${esc(subThumb(s))}" alt="" loading="lazy"></div><div>
-      <span class="status ${s.status}">${STATUS[s.status]}</span><h3 style="margin-top:8px">${esc(s.title)}</h3>
+      <span class="status ${s.status}">${statusText(s)}</span><h3 style="margin-top:8px">${esc(s.title)}</h3>
       <p>${esc(s.author || "автор не указан")} · отправлено ${ago(s.created_at)}</p>
       ${s.status === "rejected" && s.reject_reason ? `<p>Причина: ${esc(s.reject_reason)}</p>` : ""}
       <div class="row">${s.status === "approved" ? `<a class="btn" href="${watchUrl(fromSubmission(s))}">Смотреть</a>` : ""}
-      ${s.status === "pending" ? `<button class="btn danger" type="button" data-rm="${s.id}">Отменить заявку</button>` : ""}</div></div></div>`).join("")}</div>`
-      : `<div class="empty">Ты ещё ничего не отправлял. Нажми плюсик внизу, чтобы прислать свой ворк.</div>`);
+      ${s.status === "pending" ? `<button class="btn danger" type="button" data-rm="${s.id}">Отменить заявку</button>` : ""}
+      ${s.status === "approved" && s.target === "site" ? `<button class="btn danger" type="button" data-rm="${s.id}">Удалить с сайта</button>` : ""}</div></div></div>`).join("")}</div>`
+      : `<div class="empty">Ты ещё ничего не добавлял. Нажми плюсик внизу, чтобы выложить свой ворк.</div>`);
   $("#mineNew").onclick = openSubmit;
   $$("[data-rm]", box).forEach(b => b.onclick = async () => {
     const s = data.find(x => x.id === b.dataset.rm);
     const { error } = await sb.from("submissions").delete().eq("id", s.id);
     if (error) return toast(errText(error));
     const files = [s.file_path, s.thumb_path].filter(Boolean); if (files.length) sb.storage.from("videos").remove(files);
+    if (s.status === "approved") { dropPost(fromSubmission(s).key); toast("Видео удалено с сайта"); }
     tabMine(box);
   });
 }
@@ -541,9 +546,14 @@ async function tabMod(box) {
   const { data, error } = await sb.from("submissions").select("*, profiles!submissions_user_id_fkey(name, username, photo_url)")
     .eq("status", "pending").order("created_at", { ascending: true }).limit(100);
   const hid = await sb.from("hidden_videos").select("video_key, created_at").order("created_at", { ascending: false }).limit(100);
+  const site = await sb.from("submissions").select("*, profiles!submissions_user_id_fkey(name, username, photo_url)")
+    .eq("status", "approved").eq("target", "site").order("created_at", { ascending: false }).limit(50);
   if (error) { box.innerHTML = `<p class="msg err">${esc(errText(error))}</p>`; return; }
   box.innerHTML = `<h2 style="margin:0 0 12px">Заявки на проверке: ${data.length}</h2>
     ${data.length ? `<div class="items">${data.map(modItem).join("")}</div>` : `<div class="empty" style="padding:30px">Новых заявок нет 🎉</div>`}
+    <h2 style="margin:28px 0 6px">Добавили зрители (только сайт)</h2>
+    <p class="muted" style="margin:0 0 12px">Эти видео уже на сайте и в канал не попали. Плохое можно скрыть, хорошее — отправить в канал.</p>
+    ${(site.data || []).length ? `<div class="items">${site.data.filter(s => !S.hidden.has(fromSubmission(s).key)).map(siteItem).join("")}</div>` : `<div class="empty" style="padding:30px">Пока ничего</div>`}
     <div class="panel" style="margin-top:28px"><h2>Скрыть видео с сайта</h2><p class="muted">Любое видео, в том числе из базы канала. Вставь ссылку на YouTube или на видео с сайта.</p>
       <form class="row" id="hideForm" style="margin-top:10px"><input type="text" id="hideUrl" placeholder="https://youtu.be/…" style="flex:1;min-width:200px"><button class="btn" type="submit">Скрыть</button></form>
       <div class="items" style="margin-top:14px">${(hid.data || []).map(h => `<div class="row"><span style="margin-right:auto;font-family:var(--f-mono);font-size:13px;overflow-wrap:anywhere">${esc(S.byKey.get(h.video_key)?.title || h.video_key)}</span>
@@ -554,8 +564,20 @@ async function tabMod(box) {
     if (r.hidden) { r.hidden = false; $("input", r).focus(); return; }
     review(b.dataset.reject, false, $("input", r).value, box, data.find(s => s.id === b.dataset.reject));
   });
+  $$("[data-tochan]", box).forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    const { error } = await sb.rpc("send_to_channel", { sub_id: b.dataset.tochan });
+    if (error) { b.disabled = false; return toast(errText(error)); }
+    toast("Готово: бот выложит видео в канал при следующем обновлении"); tabMod(box);
+  });
+  $$("[data-hidesub]", box).forEach(b => b.onclick = async () => {
+    const key = b.dataset.hidesub;
+    const { error } = await sb.from("hidden_videos").insert({ video_key: key });
+    if (error && !/duplicate/.test(error.message)) return toast(errText(error));
+    S.hidden.add(key); dropPost(key); toast("Скрыто"); tabMod(box);
+  });
   $$("[data-play]", box).forEach(b => b.onclick = () => {
-    const s = data.find(x => x.id === b.dataset.play), t = b.closest(".thumb");
+    const s = data.concat(site.data || []).find(x => x.id === b.dataset.play), t = b.closest(".thumb");
     t.innerHTML = s.kind === "file" ? `<video src="${esc(storageUrl(s.file_path))}" controls autoplay playsinline style="object-fit:contain;background:#000"></video>`
       : `<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(s.yt_id)}?autoplay=1" allow="autoplay; encrypted-media" allowfullscreen style="width:100%;height:100%;border:0"></iframe>`;
   });
@@ -583,6 +605,15 @@ function modItem(s) {
     <p>Прислал: ${esc(who?.name || "?")}${who?.username ? " (@" + esc(who.username) + ")" : ""} · ${ago(s.created_at)}</p>
     <div class="reason" hidden><input type="text" maxlength="300" placeholder="Причина отказа (её увидит автор заявки)"></div>
     <div class="row"><button class="btn hot" type="button" data-approve="${s.id}">Выложить</button><button class="btn danger" type="button" data-reject="${s.id}">Отказать</button></div></div></div>`;
+}
+function siteItem(s) {
+  const who = s.profiles;
+  return `<div class="item"><div class="thumb${s.is_short ? " vertical" : ""}"><img src="${esc(subThumb(s))}" alt="">
+      <button class="overlay" type="button" data-play="${s.id}" style="border:0;cursor:pointer;color:inherit;font:inherit">${icon.yt}<b>Посмотреть</b></button></div><div>
+    <span class="status approved">На сайте · ${s.kind === "file" ? "файл" : "YouTube"}${s.is_short ? " · Shorts" : ""}</span>
+    <h3 style="margin-top:8px">${esc(s.title)}</h3>
+    <p>Автор: ${esc(s.author || "не указан")} · добавил ${esc(who?.name || "?")}${who?.username ? " (@" + esc(who.username) + ")" : ""} · ${ago(s.created_at)}</p>
+    <div class="row"><button class="btn hot" type="button" data-tochan="${s.id}">В канал</button><button class="btn danger" type="button" data-hidesub="${esc(fromSubmission(s).key)}">Скрыть</button></div></div></div>`;
 }
 async function review(id, approve, reason, box, sub) {
   const { error } = await sb.rpc("review_submission", { sub_id: id, approve, reason: reason || null });
@@ -634,9 +665,15 @@ function videoKeyFrom(s) {
   const m = String(s).match(/#\/(?:watch|shorts)\/([^/?#]+)/);
   return m ? decodeURIComponent(m[1]) : youtubeId(s);
 }
+const TARGET_HINT = {
+  site: "Видео сразу появится на сайте. В Telegram-канал оно не попадёт.",
+  channel: "Модераторы проверят видео и выложат его в канал @RCGDTUBE и на сайт.",
+};
 function openSubmit() {
-  if (needLogin("Войди, чтобы отправлять видео. Модераторы проверят и выложат его на сайт.")) return;
-  openSheet("Отправить видео", `<div class="seg"><button type="button" class="on" data-kind="youtube">Ссылка YouTube</button><button type="button" data-kind="file">Свой файл</button></div>
+  if (needLogin("Войди, чтобы добавлять видео на сайт или присылать их в канал.")) return;
+  openSheet("Добавить видео", `<label>Куда</label><div class="seg" id="targetSeg"><button type="button" class="on" data-target="site">Только на сайт</button><button type="button" data-target="channel">Заявка в канал</button></div>
+    <p class="muted" id="targetHint" style="margin:-4px 0 14px">${TARGET_HINT.site}</p>
+    <label>Видео</label><div class="seg" id="kindSeg"><button type="button" class="on" data-kind="youtube">Ссылка YouTube</button><button type="button" data-kind="file">Свой файл</button></div>
     <form class="stack" id="subForm">
       <div id="ytPart" class="stack"><label for="sUrl">Ссылка на видео</label><input id="sUrl" type="url" placeholder="https://youtu.be/… или youtube.com/shorts/…"></div>
       <div id="filePart" class="stack" hidden><label for="sFile">Видеофайл (до 50 МБ: mp4, webm, mov)</label><input id="sFile" type="file" accept="video/mp4,video/webm,video/quicktime"></div>
@@ -646,11 +683,16 @@ function openSubmit() {
       <label for="sDesc">Описание</label><textarea id="sDesc" maxlength="1500" placeholder="Необязательно"></textarea>
       <label for="sTags">Хэштеги</label><input id="sTags" type="text" maxlength="120" placeholder="Например: gp_deco deco">
       <label class="check"><input type="checkbox" id="sShort"> Это Shorts (вертикальное видео)</label>
-      <button class="btn hot" type="submit" id="sBtn">Отправить на проверку</button><p class="msg" id="sMsg"></p>
+      <button class="btn hot" type="submit" id="sBtn">Опубликовать на сайте</button><p class="msg" id="sMsg"></p>
     </form>`);
-  let kind = "youtube", thumbBlob = null;
-  $$(".seg button").forEach(b => b.onclick = () => {
-    kind = b.dataset.kind; $$(".seg button").forEach(x => x.classList.toggle("on", x === b));
+  let kind = "youtube", target = "site", thumbBlob = null;
+  $$("#targetSeg button").forEach(b => b.onclick = () => {
+    target = b.dataset.target; $$("#targetSeg button").forEach(x => x.classList.toggle("on", x === b));
+    $("#targetHint").textContent = TARGET_HINT[target];
+    $("#sBtn").textContent = target === "site" ? "Опубликовать на сайте" : "Отправить на проверку";
+  });
+  $$("#kindSeg button").forEach(b => b.onclick = () => {
+    kind = b.dataset.kind; $$("#kindSeg button").forEach(x => x.classList.toggle("on", x === b));
     $("#ytPart").hidden = kind !== "youtube"; $("#filePart").hidden = kind !== "file"; $("#sPrev").hidden = true;
   });
   $("#sUrl").oninput = async () => {
@@ -688,7 +730,7 @@ function openSubmit() {
   $("#subForm").onsubmit = async e => {
     e.preventDefault();
     const btn = $("#sBtn"), msg = $("#sMsg"), say = (t, k) => { msg.textContent = t; msg.className = "msg" + (k ? " " + k : ""); };
-    const row = { kind, title: $("#sTitle").value.trim(), author: $("#sAuthor").value.trim(), description: $("#sDesc").value.trim(), tags: $("#sTags").value.trim(), is_short: $("#sShort").checked };
+    const row = { target, kind, title: $("#sTitle").value.trim(), author: $("#sAuthor").value.trim(), description: $("#sDesc").value.trim(), tags: $("#sTags").value.trim(), is_short: $("#sShort").checked };
     if (!row.title) return say("Напиши название.", "err");
     btn.disabled = true;
     try {
@@ -710,11 +752,19 @@ function openSubmit() {
           if (!t.error) row.thumb_path = t.data.path;
         }
       }
-      say("Отправляю заявку…");
-      const { error } = await sb.from("submissions").insert(row);
+      say(target === "site" ? "Публикую…" : "Отправляю заявку…");
+      const { data: saved, error } = await sb.from("submissions").insert(row).select().single();
       if (error) throw error;
-      closeSheet(); toast("Заявка отправлена! Модераторы скоро посмотрят.");
-      if (location.hash.startsWith("#/you")) route();
+      closeSheet();
+      if (target === "site") {
+        const p = fromSubmission(saved);
+        addPost(p); S.posts.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+        toast("Видео опубликовано на сайте!");
+        location.hash = watchUrl(p);
+      } else {
+        toast("Заявка отправлена! Модераторы скоро посмотрят.");
+        if (location.hash.startsWith("#/you")) route();
+      }
     } catch (err) { say(errText(err), "err"); btn.disabled = false; }
   };
 }
