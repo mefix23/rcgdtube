@@ -223,14 +223,222 @@ function home() {
   bindMore(home);
 }
 
+// ---------- свой плеер ----------
+// Видео из Telegram-канала идут через наш сервер (CFG.streamUrl), поэтому смотрятся без YouTube и без VPN.
+// Если сервера нет или в посте нет видео — показываем обычный плеер YouTube.
+const STREAM = (CFG.streamUrl || "").replace(/\/+$/, "");
+const tgVideoUrl = p => STREAM && p.tg ? `${STREAM}/v/${p.tg}` : null;
+const pIcon = {
+  play: '<svg viewBox="0 0 24 24"><path class="f" d="M8 5.5v13a1 1 0 0 0 1.5.86l10.4-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z"/></svg>',
+  pause: '<svg viewBox="0 0 24 24"><path class="f" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>',
+  vol: '<svg viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 18V6L7.5 9.5zM15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg>',
+  mute: '<svg viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 18V6L7.5 9.5zM16 9.5l5 5M21 9.5l-5 5"/></svg>',
+  full: '<svg viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg>',
+  unfull: '<svg viewBox="0 0 24 24"><path d="M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5"/></svg>',
+  pip: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><rect class="f" x="12" y="11.5" width="7" height="5.5" rx="1"/></svg>',
+  back: '<svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.3-5.6M4 4v4h4"/><text x="12" y="15.5" font-size="7.5" text-anchor="middle" fill="currentColor" stroke="none" font-weight="800">10</text></svg>',
+  fwd: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"/><text x="12" y="15.5" font-size="7.5" text-anchor="middle" fill="currentColor" stroke="none" font-weight="800">10</text></svg>',
+};
+function fmtT(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, x = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${x}` : `${m}:${x}`;
+}
+const probeCache = new Map();
+function probeTg(p) { // есть ли в посте канала видео, которое отдаст наш сервер
+  if (!STREAM || !p.tg) return Promise.resolve(null);
+  if (!probeCache.has(p.tg)) probeCache.set(p.tg, (async () => {
+    const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 9000);
+    try {
+      const r = await fetch(`${STREAM}/info/${p.tg}`, { signal: ctl.signal });
+      const j = r.ok ? await r.json() : null;
+      if (!j) probeCache.delete(p.tg); // сервер не ответил — в следующий раз спросим снова
+      return j?.video || null;
+    } catch { probeCache.delete(p.tg); return null; } finally { clearTimeout(t); }
+  })());
+  return probeCache.get(p.tg);
+}
+function mountPlayer(box, src, o = {}) {
+  const pip = document.pictureInPictureEnabled && !o.vertical;
+  box.innerHTML = `<div class="vp is-paused" tabindex="0" aria-label="Видеоплеер">
+    <video playsinline preload="metadata"${o.poster ? ` poster="${esc(o.poster)}"` : ""}${o.loop ? " loop" : ""}></video>
+    <div class="vp-spin" hidden></div><div class="vp-flash" aria-hidden="true"></div>
+    <button class="vp-big" type="button" aria-label="Смотреть">${pIcon.play}</button>
+    <div class="vp-ctl">
+      <div class="vp-seek"><div class="vp-track"><div class="vp-buf"></div><div class="vp-done"></div></div><div class="vp-knob"></div><div class="vp-tip" hidden></div></div>
+      <div class="vp-row">
+        <button class="vp-b" type="button" data-a="play" aria-label="Смотреть / пауза (K)">${pIcon.play}</button>
+        <button class="vp-b vp-hide-s" type="button" data-a="back" aria-label="Назад на 10 секунд (J)">${pIcon.back}</button>
+        <button class="vp-b vp-hide-s" type="button" data-a="fwd" aria-label="Вперёд на 10 секунд (L)">${pIcon.fwd}</button>
+        <div class="vp-vol"><button class="vp-b" type="button" data-a="mute" aria-label="Звук (M)">${pIcon.vol}</button><input class="vp-volr" type="range" min="0" max="1" step="0.05" aria-label="Громкость"></div>
+        <span class="vp-time">0:00 / ${fmtT(o.duration)}</span><span class="vp-sp"></span>
+        <button class="vp-b vp-txt" type="button" data-a="speed" aria-label="Скорость">1×</button>
+        ${pip ? `<button class="vp-b vp-hide-s" type="button" data-a="pip" aria-label="Мини-плеер">${pIcon.pip}</button>` : ""}
+        <button class="vp-b" type="button" data-a="full" aria-label="Во весь экран (F)">${pIcon.full}</button>
+      </div></div></div>`;
+  const root = $(".vp", box), v = $("video", root), q = s => $(s, root);
+  const SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2];
+  let hideT = 0, tapT = 0, lastTap = 0, failed = false;
+  try {
+    const vol = localStorage.getItem("vpVol");
+    if (vol !== null && +vol >= 0 && +vol <= 1) v.volume = +vol;
+    v.muted = localStorage.getItem("vpMuted") === "1";
+  } catch { /* браузер не даёт хранилище — не страшно */ }
+  const dur = () => (isFinite(v.duration) && v.duration) || o.duration || 0;
+  const paint = () => {
+    q('[data-a="play"]').innerHTML = v.paused ? pIcon.play : pIcon.pause;
+    q('[data-a="mute"]').innerHTML = v.muted || !v.volume ? pIcon.mute : pIcon.vol;
+    q(".vp-volr").value = v.muted ? 0 : v.volume;
+    root.classList.toggle("is-paused", v.paused);
+  };
+  const tick = () => {
+    const d = dur(), pc = d ? Math.min(100, v.currentTime / d * 100) : 0;
+    q(".vp-time").textContent = `${fmtT(v.currentTime)} / ${fmtT(d)}`;
+    if (!seekBar.classList.contains("drag")) { q(".vp-done").style.width = pc + "%"; q(".vp-knob").style.left = pc + "%"; }
+  };
+  const buffered = () => {
+    const d = dur(); if (!d || !v.buffered.length) return;
+    let end = 0;
+    for (let i = 0; i < v.buffered.length; i++) if (v.buffered.start(i) <= v.currentTime + 1) end = Math.max(end, v.buffered.end(i));
+    q(".vp-buf").style.width = Math.min(100, end / d * 100) + "%";
+  };
+  const show = () => { root.classList.add("show"); clearTimeout(hideT); if (!v.paused) hideT = setTimeout(() => root.classList.remove("show"), 2600); };
+  const toggle = () => { if (v.paused) v.play().catch(() => { }); else v.pause(); };
+  const flash = t => { const f = q(".vp-flash"); f.textContent = t; f.classList.remove("on"); void f.offsetWidth; f.classList.add("on"); };
+  const seekBy = s => { v.currentTime = Math.max(0, Math.min(dur() - 0.2, v.currentTime + s)); flash(s > 0 ? `+${s} с` : `−${-s} с`); show(); };
+  const fsEl = () => document.fullscreenElement || document.webkitFullscreenElement;
+  const full = () => {
+    if (fsEl()) (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+    else if (root.requestFullscreen) root.requestFullscreen().catch(() => { });
+    else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
+    else if (v.webkitEnterFullscreen) v.webkitEnterFullscreen(); // iPhone
+  };
+  const fail = () => {
+    if (failed) return; failed = true;
+    if (o.onFail) return o.onFail();
+    root.insertAdjacentHTML("beforeend", `<div class="vp-err"><b>Видео не загрузилось</b><span>Проверь интернет и попробуй ещё раз.</span><button class="btn" type="button">Ещё раз</button></div>`);
+    $(".vp-err button", root).onclick = () => { failed = false; $(".vp-err", root).remove(); const t = v.currentTime; v.load(); v.currentTime = t; v.play().catch(() => { }); };
+  };
+
+  v.addEventListener("play", () => { paint(); show(); });
+  v.addEventListener("pause", () => { paint(); show(); });
+  v.addEventListener("timeupdate", tick);
+  v.addEventListener("durationchange", tick);
+  v.addEventListener("progress", buffered);
+  v.addEventListener("seeked", buffered);
+  v.addEventListener("volumechange", () => {
+    paint();
+    try { localStorage.setItem("vpVol", String(v.volume)); localStorage.setItem("vpMuted", v.muted ? "1" : "0"); } catch { }
+  });
+  v.addEventListener("waiting", () => { q(".vp-spin").hidden = false; root.classList.add("is-waiting"); });
+  ["playing", "canplay", "pause"].forEach(ev => v.addEventListener(ev, () => { q(".vp-spin").hidden = true; root.classList.remove("is-waiting"); }));
+  v.addEventListener("error", fail);
+  v.addEventListener("ended", () => { paint(); show(); });
+
+  q(".vp-big").onclick = e => { e.stopPropagation(); toggle(); };
+  v.addEventListener("click", e => {
+    const touch = e.pointerType === "touch" || matchMedia("(hover: none)").matches;
+    if (!touch) { toggle(); show(); return; }
+    const now = Date.now(), r = v.getBoundingClientRect(), x = e.clientX - r.left;
+    clearTimeout(tapT);
+    if (now - lastTap < 300) { lastTap = 0; seekBy(x < r.width / 2 ? -10 : 10); return; } // двойной тап — перемотка
+    lastTap = now;
+    tapT = setTimeout(() => { if (root.classList.contains("show") || v.paused) toggle(); show(); }, 300);
+  });
+  v.addEventListener("dblclick", e => { if (e.pointerType !== "touch" && !matchMedia("(hover: none)").matches) full(); });
+  root.addEventListener("pointermove", e => { if (e.pointerType === "mouse") show(); });
+  root.addEventListener("mouseleave", () => { if (!v.paused) root.classList.remove("show"); });
+
+  q(".vp-row").addEventListener("click", e => {
+    const a = e.target.closest("[data-a]")?.dataset.a; if (!a) return;
+    show();
+    if (a === "play") toggle();
+    else if (a === "back") seekBy(-10);
+    else if (a === "fwd") seekBy(10);
+    else if (a === "mute") { if (!v.volume) v.volume = 1; v.muted = !v.muted; }
+    else if (a === "speed") {
+      const i = (SPEEDS.indexOf(v.playbackRate) + 1) % SPEEDS.length;
+      v.playbackRate = SPEEDS[i]; e.target.closest("button").textContent = SPEEDS[i] + "×"; flash(`Скорость ${SPEEDS[i]}×`);
+    }
+    else if (a === "pip") { if (document.pictureInPictureElement) document.exitPictureInPicture(); else v.requestPictureInPicture?.().catch(() => { }); }
+    else if (a === "full") full();
+  });
+  q(".vp-volr").addEventListener("input", e => { v.volume = +e.target.value; v.muted = !v.volume; });
+
+  const seekBar = q(".vp-seek"), tip = q(".vp-tip");
+  const ratio = e => { const r = seekBar.getBoundingClientRect(); return Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)); };
+  const preview = x => { q(".vp-done").style.width = x * 100 + "%"; q(".vp-knob").style.left = x * 100 + "%"; };
+  seekBar.addEventListener("pointerdown", e => { seekBar.classList.add("drag"); seekBar.setPointerCapture(e.pointerId); preview(ratio(e)); show(); });
+  seekBar.addEventListener("pointermove", e => {
+    const x = ratio(e); tip.hidden = false; tip.style.left = x * 100 + "%"; tip.textContent = fmtT(x * dur());
+    if (seekBar.classList.contains("drag")) { preview(x); show(); }
+  });
+  const drop = e => {
+    if (!seekBar.classList.contains("drag")) return;
+    seekBar.classList.remove("drag"); tip.hidden = true;
+    if (dur()) v.currentTime = ratio(e) * dur();
+  };
+  seekBar.addEventListener("pointerup", drop);
+  seekBar.addEventListener("pointercancel", () => { seekBar.classList.remove("drag"); tip.hidden = true; });
+  seekBar.addEventListener("pointerleave", () => { if (!seekBar.classList.contains("drag")) tip.hidden = true; });
+
+  root.addEventListener("keydown", e => {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.target.matches("input")) return;
+    const k = e.key.toLowerCase(), act = {
+      " ": toggle, k: toggle, "л": toggle, j: () => seekBy(-10), "о": () => seekBy(-10), l: () => seekBy(10), "д": () => seekBy(10),
+      arrowleft: () => seekBy(-5), arrowright: () => seekBy(5), f: full, "а": full, m: () => { v.muted = !v.muted; }, "ь": () => { v.muted = !v.muted; },
+      arrowup: () => { v.muted = false; v.volume = Math.min(1, v.volume + .1); flash(`Громкость ${Math.round(v.volume * 100)}%`); },
+      arrowdown: () => { v.volume = Math.max(0, v.volume - .1); flash(`Громкость ${Math.round(v.volume * 100)}%`); },
+    }[k] || (/^[0-9]$/.test(k) ? () => { v.currentTime = dur() * +k / 10; show(); } : null);
+    if (act) { e.preventDefault(); act(); }
+  });
+  const onFs = () => { q('[data-a="full"]').innerHTML = fsEl() ? pIcon.unfull : pIcon.full; };
+  document.addEventListener("fullscreenchange", onFs);
+  document.addEventListener("webkitfullscreenchange", onFs);
+
+  v.src = src;
+  paint();
+  if (o.autoplay !== false) v.play().catch(() => { /* браузер запретил автозапуск — ждём нажатия */ });
+  root.focus({ preventScroll: true });
+  return { root, video: v };
+}
+function ytFrame(p) {
+  return `<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(p.yt)}?rel=0&autoplay=1&playsinline=1"
+    title="${esc(p.title)}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>`;
+}
+// Плеер на странице видео: сначала пробуем Telegram, если не вышло — YouTube.
+async function mountMainPlayer(p) {
+  const box = $("#mainPlayer"), line = $("#srcLine");
+  if (!box) return;
+  const useYouTube = (why) => {
+    if (!p.yt) { box.innerHTML = `<div class="vp-err"><b>Видео сейчас недоступно</b><a class="btn" href="https://t.me/${CHANNEL}/${p.tg}" target="_blank" rel="noopener">${icon.tg}Смотреть в Telegram</a></div>`; return; }
+    box.classList.remove("vertical");
+    box.innerHTML = ytFrame(p);
+    if (line) line.innerHTML = why ? `<span>${esc(why)}</span>${p.tg ? `<a href="https://t.me/${CHANNEL}/${p.tg}" target="_blank" rel="noopener" style="color:var(--pink);font-weight:700">Смотреть в Telegram</a>` : ""}` : "";
+  };
+  if (p.file) { mountPlayer(box, p.file, { poster: p.thumb, vertical: p.short }); return; }
+  if (!STREAM || !p.tg) return useYouTube("");
+  const vid = await probeTg(p);
+  if ($("#mainPlayer") !== box) return; // пока ждали, человек ушёл на другую страницу
+  if (!vid) return useYouTube(p.yt ? "Плеер YouTube: в посте канала нет видеофайла." : "");
+  const vertical = vid.h > vid.w;
+  box.classList.toggle("vertical", vertical);
+  mountPlayer(box, tgVideoUrl(p), { poster: p.yt ? thumbOf(p, "hqdefault") : "", duration: vid.duration, vertical,
+    onFail: () => useYouTube("Telegram-копия не загрузилась, включил YouTube.") });
+  if (line) {
+    line.innerHTML = `<span class="dot"></span><span>Смотришь через Telegram — без VPN${vid.h ? ` · ${Math.min(vid.w, vid.h)}p` : ""}</span>${p.yt ? `<button type="button" id="toYt">Включить плеер YouTube</button>` : ""}`;
+    const b = $("#toYt"); if (b) b.onclick = () => useYouTube("");
+  }
+}
+
 // ---------- страница видео ----------
 function playerHtml(p) {
-  if (p.file) return `<div class="player${p.short ? " vertical" : ""}"><video src="${esc(p.file)}" controls autoplay playsinline poster="${esc(p.thumb || "")}"></video></div>`;
+  const poster = p.file ? p.thumb : p.yt ? thumbOf(p, "hqdefault") : "";
+  if (p.file || (STREAM && p.tg)) return `<div class="player${p.short ? " vertical" : ""}" id="mainPlayer">${poster ? `<img class="vp-poster" src="${esc(poster)}" alt="">` : ""}<div class="vp-spin"></div></div><div class="src-line" id="srcLine"></div>`;
   const yt = `https://www.youtube.com/watch?v=${encodeURIComponent(p.yt)}`;
   if (p.noembed) return `<a class="player" href="${yt}" target="_blank" rel="noopener"><img src="${esc(thumbOf(p, "hqdefault"))}" alt="">
     <div class="overlay">${icon.yt}<b>Автор разрешил смотреть это видео только на YouTube</b><span class="btn hot">Открыть на YouTube</span></div></a>`;
-  return `<div class="player"><iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(p.yt)}?rel=0&autoplay=1&playsinline=1"
-    title="${esc(p.title)}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></div>`;
+  return `<div class="player">${ytFrame(p)}</div>`;
 }
 function subBtn(p) {
   const k = authorKey(p), on = S.subs.has(k);
@@ -259,6 +467,7 @@ function watch(key) {
   </div>
   <aside class="up-next">${same.length ? `<h4>Ещё от ${esc(p.author)}</h4>${same.map(x => card(x, true)).join("")}` : ""}<h4>${same.length ? "Новое на канале" : "Ещё на канале"}</h4>${rest.map(x => card(x, true)).join("")}</aside></div>`;
   window.scrollTo(0, 0);
+  mountMainPlayer(p);
   bindVideoActions($("#app"), p);
   loadStats(p, $("#app"));
   renderComments(p, $("#comments"));
@@ -416,16 +625,21 @@ function shortSlide(p) {
 }
 function activateShort(el, p) {
   const slot = $(".s-slot", el); if (!slot || slot.childElementCount) return;
-  if (p.file) {
-    slot.innerHTML = `<video src="${esc(p.file)}" loop playsinline></video>`;
+  const own = p.file || tgVideoUrl(p);
+  if (own) {
+    slot.innerHTML = `<video src="${esc(own)}" loop playsinline preload="auto"></video>`;
     const v = $("video", slot);
     v.play().catch(() => { v.muted = true; v.play().catch(() => { }); });
     v.onclick = () => { if (v.muted) v.muted = false; else v.paused ? v.play() : v.pause(); };
+    if (!p.file && p.yt) v.onerror = () => { slot.innerHTML = ""; activateShortYt(slot, p); }; // в посте нет видео — берём YouTube
   }
-  else slot.innerHTML = `<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(p.yt)}?autoplay=1&loop=1&playlist=${encodeURIComponent(p.yt)}&playsinline=1&rel=0&modestbranding=1"
-    allow="autoplay; encrypted-media; picture-in-picture; web-share" allowfullscreen title="${esc(p.title)}"></iframe>`;
+  else activateShortYt(slot, p);
   history.replaceState(null, "", "#/shorts/" + encodeURIComponent(p.key));
   loadStats(p, el); remember(p);
+}
+function activateShortYt(slot, p) {
+  slot.innerHTML = `<iframe src="https://www.youtube-nocookie.com/embed/${encodeURIComponent(p.yt)}?autoplay=1&loop=1&playlist=${encodeURIComponent(p.yt)}&playsinline=1&rel=0&modestbranding=1"
+    allow="autoplay; encrypted-media; picture-in-picture; web-share" allowfullscreen title="${esc(p.title)}"></iframe>`;
 }
 function deactivateShort(el) { const slot = $(".s-slot", el); if (slot) slot.innerHTML = ""; }
 
