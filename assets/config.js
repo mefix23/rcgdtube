@@ -5,7 +5,7 @@
 window.RCGD_CONFIG = {
   "supabaseUrl": "https://koyesdmntcuabkqdrjjr.supabase.co",
   "supabaseKey": "sb_publishable_4-ciYVyVJjgz3tYofVL1rA_O-J-IMoq",
-  "loginBot": "",
+  "loginBot": "RCGDTUBEbot",
   "channel": "RCGDTUBE",
   "site": "https://mefix23.github.io/rcgdtube/"
 };
