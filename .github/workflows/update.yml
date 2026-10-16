@@ -1,5 +1,5 @@
 # Каждые 15 минут берёт свежую базу ворков, обновляет сайт
-# и выкладывает в Telegram-канал новые видео от админов.
+# и выкладывает в Telegram-канал видео, одобренные модераторами.
 name: Обновить сайт
 
 on:
@@ -36,7 +36,7 @@ jobs:
           pip install requests==2.32.3
           python scripts/build_data.py
 
-      - name: Выложить новые видео от админов в Telegram
+      - name: Выложить одобренные видео в Telegram
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -46,7 +46,7 @@ jobs:
       - name: Убрать файлы старой версии сайта
         run: |
           find media -type f ! -name logo.jpg -delete 2>/dev/null || true
-          rm -f scripts/fetch_posts.py
+          rm -f scripts/fetch_posts.py upload.html setup.html assets/upload.js assets/setup.js assets/keys.js assets/admin.css
 
       - name: Сохранить список в репозиторий
         run: |
