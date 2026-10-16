@@ -92,3 +92,17 @@ header{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:#0c
 .updated{font:500 12px var(--f-mono);color:var(--muted)}
 .loading{padding:80px 0;text-align:center;color:var(--muted)}
 @media (prefers-reduced-motion:reduce){.thumb img{transition:none}}
+/* версия 2: YouTube-ворки */
+.player iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+.player>img{width:100%;height:100%;object-fit:cover;display:block}
+a.player{display:block;text-decoration:none}
+a.who{text-decoration:none;color:inherit}
+a.who:hover b{text-decoration:underline}
+.found{margin:0 0 12px;color:var(--muted);font-size:14px}
+.chan .av{font-size:34px}
+.side h4+.card,.side h4{margin-top:0}
+.side .card+h4{margin-top:22px}
+.foot{border-top:1px solid var(--line);margin-top:8px}
+.foot .wrap{display:flex;gap:16px;flex-wrap:wrap;justify-content:space-between;padding-block:20px 28px;color:var(--muted);font-size:13px}
+.foot a{color:var(--muted)}
+.foot a:hover{color:var(--fg)}
