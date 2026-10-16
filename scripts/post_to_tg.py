@@ -1,156 +1,165 @@
 """
-Бот РКГДTUBE: выкладывает в Telegram-канал видео, которые админы добавили на сайт
-(их ещё нет в канале — всё, что есть в базе канала, бот не трогает).
+Бот РКГДTUBE: выкладывает в Telegram-канал видео, которые прислали зрители через плюсик
+и одобрили модераторы. Ворки из базы канала бот не трогает — они в канале уже есть.
 
 Формат поста:
     <b>Название</b> — by <b>ник</b> [ORIGINAL]
-    > описание видео (цитатой)
+    > описание (цитатой)
     #хэштеги
 
     СМОТРЕТЬ НА САЙТЕ
 
+Ссылки YouTube уходят текстом с превью видео сверху, свои файлы — самим видео (до 50 МБ).
+
 Настройки (GitHub → Settings → Secrets and variables → Actions):
     секрет     TELEGRAM_BOT_TOKEN — токен бота от @BotFather
     переменная TELEGRAM_CHAT_ID   — канал: @имя_канала или -100…
-Если их нет, бот просто ничего не делает.
-
-Что уже выложено, запоминается в data/tg_posted.json.
+Без них бот ничего не делает. Что уже выложено — data/tg_posted.json.
 """
 import html
 import json
 import os
 import re
 import sys
+import tempfile
 import time
 
 import requests
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-POSTS = os.path.join(ROOT, "data", "posts.json")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import ROOT, SITE, UA, approved_submissions, hashtag, hidden_keys, load_json, storage_url, submission_key  # noqa: E402
+
 POSTED = os.path.join(ROOT, "data", "tg_posted.json")
-UPLOADS_URL = os.environ.get("UPLOADS_URL", "https://raw.githubusercontent.com/mefix23/rcgdtube-uploads/main/uploads.json")
-SITE = os.environ.get("SITE_URL", "https://mefix23.github.io/rcgdtube/")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 CHAT = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-MAX_PER_RUN = int(os.environ.get("TG_MAX_PER_RUN", "10"))  # чтобы не завалить канал за один раз
-UA = {"User-Agent": "Mozilla/5.0 (compatible; RCGDTUBE-bot/1.0)", "Accept-Language": "ru,en;q=0.8"}
-
-
-def load(path, default):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return default
+MAX_PER_RUN = int(os.environ.get("TG_MAX_PER_RUN", "10"))  # чтобы не завалить канал за раз
 
 
 def youtube_description(vid):
-    """Описание видео со страницы YouTube (без ключей и регистрации). Пусто, если не получилось."""
+    """Описание видео со страницы YouTube (без ключей). Пусто, если не получилось."""
     try:
-        r = requests.get(f"https://www.youtube.com/watch?v={vid}", headers=UA, timeout=20)
+        r = requests.get(f"https://www.youtube.com/watch?v={vid}", headers=UA, timeout=20,
+                         cookies={"CONSENT": "YES+cb", "SOCS": "CAI"})
         m = re.search(r'"shortDescription":("(?:[^"\\]|\\.)*")', r.text)
         return json.loads(m.group(1)).strip() if m else ""
     except Exception:
         return ""
 
 
-def hashtag(s):
-    t = re.sub(r"[^\w]+", "_", s.strip(), flags=re.UNICODE).strip("_")
-    return "#" + t if t else ""
-
-
-def build_text(p, extra):
-    """Текст поста в формате канала."""
+def build_text(s, key, limit):
+    """Текст поста в формате канала. limit — сколько символов можно (у подписи к видео меньше)."""
     e = html.escape
-    yt = f"https://youtu.be/{p['yt']}"
-    title = (extra.get("title") or p["title"]).strip()
-    author = (extra.get("author") or p["author"]).strip()
-    head = f"<b>{e(title)}</b> — by <b>{e(author)}</b> [<a href=\"{yt}\">ORIGINAL</a>]"
-
-    desc = (extra.get("desc") or "").strip() or youtube_description(p["yt"])
-    desc = re.sub(r"\n{3,}", "\n\n", desc)
-    if len(desc) > 700:
-        desc = desc[:700].rsplit(" ", 1)[0] + "…"
+    title = (s.get("title") or "").strip() or "Без названия"
+    author = (s.get("author") or "").strip() or "неизвестный автор"
+    original = f"https://youtu.be/{s['yt_id']}" if s.get("yt_id") else None
+    head = f"<b>{e(title)}</b> — by <b>{e(author)}</b>" + (f" [<a href=\"{original}\">ORIGINAL</a>]" if original else "")
 
     tags = [hashtag(author)]
-    for t in re.split(r"[\s,]+", extra.get("tags") or ""):
+    for t in re.split(r"[\s,]+", s.get("tags") or ""):
         t = hashtag(t.lstrip("#"))
         if t and t.lower() not in (x.lower() for x in tags):
             tags.append(t)
+    tags_line = " ".join(t for t in tags if t)
+    link = f"<a href=\"{SITE}#/{'shorts' if s.get('is_short') else 'watch'}/{key}\">СМОТРЕТЬ НА САЙТЕ</a>"
+
+    desc = (s.get("description") or "").strip() or (youtube_description(s["yt_id"]) if s.get("yt_id") else "")
+    desc = re.sub(r"\n{3,}", "\n\n", desc)
+    fixed = len(head) + len(tags_line) + len(link) + 60
+    room = max(0, min(700, limit - fixed))
+    if len(desc) > room:
+        desc = (desc[:room].rsplit(" ", 1)[0] + "…") if room > 20 else ""
 
     parts = [head]
     if desc:
         parts.append(f"<blockquote expandable>{e(desc)}</blockquote>")
-    tags = [t for t in tags if t]
-    if tags:
-        parts.append(" ".join(tags))
-    link = f"<a href=\"{SITE}#v{p['yt']}\">СМОТРЕТЬ НА САЙТЕ</a>"
+    if tags_line:
+        parts.append(tags_line)
     return "\n".join(parts) + "\n\n" + link
 
 
-def send(text, vid):
-    """Отправить пост. Возвращает 'ok', 'retry' (попробовать в следующий раз) или 'skip'."""
-    body = {
-        "chat_id": CHAT,
-        "text": text,
-        "parse_mode": "HTML",
-        # сверху поста — превью видео с YouTube, его можно смотреть прямо в Telegram
-        "link_preview_options": {"url": f"https://www.youtube.com/watch?v={vid}",
-                                 "prefer_large_media": True, "show_above_text": True},
-    }
+def call(method, **kw):
+    """Запрос к Telegram. Возвращает (ответ, код)."""
     for _ in range(3):
         try:
-            r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json=body, timeout=30)
+            r = requests.post(f"https://api.telegram.org/bot{TOKEN}/{method}", timeout=120, **kw)
         except requests.RequestException as ex:
             print("  Telegram не ответил:", ex)
-            return "retry"
-        j = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
-        if j.get("ok"):
-            return "ok"
+            return None, 0
+        try:
+            j = r.json()
+        except ValueError:
+            j = {}
         if r.status_code == 429:
             time.sleep(int(j.get("parameters", {}).get("retry_after", 5)) + 1)
             continue
-        desc = j.get("description", r.text[:200])
-        print("  Telegram отказал:", r.status_code, desc)
-        if r.status_code in (401, 403) or "chat not found" in desc.lower():
-            return "fatal"
-        return "skip" if r.status_code == 400 else "retry"
-    return "retry"
+        return j, r.status_code
+    return None, 429
+
+
+def publish(s, key):
+    """'ok' + номер сообщения, 'retry' (позже), 'skip' (не получится никогда) или 'fatal' (бот не настроен)."""
+    if s["kind"] == "youtube":
+        j, code = call("sendMessage", json={
+            "chat_id": CHAT, "text": build_text(s, key, 4096), "parse_mode": "HTML",
+            "link_preview_options": {"url": f"https://www.youtube.com/watch?v={s['yt_id']}",
+                                     "prefer_large_media": True, "show_above_text": True},
+        })
+    else:
+        url = storage_url(s["file_path"])
+        try:
+            with requests.get(url, headers=UA, timeout=120, stream=True) as r:
+                r.raise_for_status()
+                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(s["file_path"])[1] or ".mp4")
+                for chunk in r.iter_content(1 << 16):
+                    tmp.write(chunk)
+                tmp.close()
+        except Exception as ex:
+            print("  файл не скачался:", ex)
+            return "retry", None
+        try:
+            with open(tmp.name, "rb") as f:
+                j, code = call("sendVideo", data={
+                    "chat_id": CHAT, "caption": build_text(s, key, 1024), "parse_mode": "HTML", "supports_streaming": "true",
+                }, files={"video": (os.path.basename(s["file_path"]), f)})
+        finally:
+            os.remove(tmp.name)
+    if j and j.get("ok"):
+        return "ok", j["result"]["message_id"]
+    desc = (j or {}).get("description", "")
+    print("  Telegram отказал:", code, desc)
+    if code in (401, 403) or "chat not found" in desc.lower():
+        return "fatal", None
+    return ("skip" if code == 400 else "retry"), None
 
 
 def main():
     if not TOKEN or not CHAT:
         print("Бот не настроен (нет TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID) — пропускаю.")
         return
-
-    posts = load(POSTS, {}).get("posts", [])
-    state = load(POSTED, {"posted": {}, "failed": []})
+    state = load_json(POSTED, {"posted": {}, "failed": []})
     done = state.setdefault("posted", {})
     failed = set(state.setdefault("failed", []))
+    hidden = hidden_keys()
 
-    try:
-        up = requests.get(UPLOADS_URL, headers=UA, timeout=30).json()
-    except Exception:
-        up = {"videos": []}
-    extra = {v.get("yt"): v for v in up.get("videos", []) if v.get("yt")}
-
-    # только видео от админов: всё, что из базы, в канале уже есть
-    todo = [p for p in posts if p.get("admin") and p["yt"] not in done and p["yt"] not in failed]
-    todo.sort(key=lambda p: p.get("date") or "")
+    todo = []
+    for s in approved_submissions():
+        key = submission_key(s)
+        if key not in done and key not in failed and key not in hidden:
+            todo.append((s, key))
+    todo.sort(key=lambda x: x[0].get("reviewed_at") or "")
     if not todo:
         print("Новых видео для канала нет.")
         return
 
     sent, fatal = 0, False
-    for p in todo[:MAX_PER_RUN]:
-        text = build_text(p, extra.get(p["yt"], {}))
-        res = send(text, p["yt"])
-        print(f"  {p['yt']} «{p['title']}»: {res}")
+    for s, key in todo[:MAX_PER_RUN]:
+        res, msg_id = publish(s, key)
+        print(f"  {key} «{s.get('title')}»: {res}")
         if res == "ok":
-            done[p["yt"]] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            done[key] = {"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "msg": msg_id}
             sent += 1
         elif res == "skip":
-            failed.add(p["yt"])
+            failed.add(key)
         elif res == "fatal":
             fatal = True
             break

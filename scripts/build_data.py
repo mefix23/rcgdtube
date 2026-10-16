@@ -1,41 +1,38 @@
 """
-Собирает список видео для сайта РКГДTUBE.
+Собирает список видео для сайта РКГДTUBE → data/posts.json.
 
 Откуда берутся видео:
-  1. SQL-база создателя канала: github.com/kilor231/rcgdtube-bd (файл gdchannels.db).
-     В ней только ворки с YouTube, которые выходили в канале, без пересылок.
-  2. Видео, которые админы добавили вручную через страницу upload.html
-     (хранятся в репозитории mefix23/rcgdtube-uploads, файл uploads.json).
+  1. SQL-база создателя канала: github.com/kilor231/rcgdtube-bd (gdchannels.db) —
+     ворки с YouTube, которые выходили в канале, без пересылок.
+  2. Заявки зрителей, которые одобрили модераторы (таблица submissions в Supabase).
 
-Названия видео подтягиваются с YouTube и запоминаются в data/yt_meta.json,
-чтобы каждый раз не спрашивать заново. Превью и плеер тоже с YouTube,
-поэтому картинки хранить не нужно.
-
-Результат: data/posts.json — его читает сайт.
-Запускается автоматически на GitHub каждые 30 минут.
+Для видео с YouTube узнаём название и проверяем, Shorts это или обычное видео.
+Ответы YouTube запоминаются в data/yt_meta.json, чтобы не спрашивать заново.
+Модераторы могут скрыть любое видео (таблица hidden_videos) — его в списке не будет.
+Запускается на GitHub каждые 15 минут.
 """
 import json
 import os
 import sqlite3
 import sys
 import tempfile
-import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import requests
 
-DB_URL = os.environ.get("DB_URL", "https://raw.githubusercontent.com/kilor231/rcgdtube-bd/main/gdchannels.db")
-UPLOADS_URL = os.environ.get("UPLOADS_URL", "https://raw.githubusercontent.com/mefix23/rcgdtube-uploads/main/uploads.json")
-# номер канала РКГДTUBE внутри базы
-MAIN_CHAT_ID = int(os.environ.get("MAIN_CHAT_ID", "-1002627414327"))
-CHANNEL = "RCGDTUBE"
-LOOKUPS_PER_RUN = int(os.environ.get("LOOKUPS_PER_RUN", "1500"))  # сколько новых названий узнавать за один запуск
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common import ROOT, UA, approved_submissions, hidden_keys, load_json, storage_url, submission_key  # noqa: E402
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DB_URL = os.environ.get("DB_URL", "https://raw.githubusercontent.com/kilor231/rcgdtube-bd/main/gdchannels.db")
+MAIN_CHAT_ID = int(os.environ.get("MAIN_CHAT_ID", "-1002627414327"))  # канал РКГДTUBE внутри базы
+CHANNEL = "RCGDTUBE"
+LOOKUPS_PER_RUN = int(os.environ.get("LOOKUPS_PER_RUN", "1500"))  # сколько видео проверять на YouTube за запуск
+
 OUT = os.path.join(ROOT, "data", "posts.json")
 META = os.path.join(ROOT, "data", "yt_meta.json")
-UA = {"User-Agent": "Mozilla/5.0 (compatible; RCGDTUBE-site/2.0)"}
+POSTED = os.path.join(ROOT, "data", "tg_posted.json")
+YT_COOKIES = {"CONSENT": "YES+cb", "SOCS": "CAI"}  # чтобы YouTube не показывал окно согласия
 
 
 def now_iso():
@@ -45,14 +42,6 @@ def now_iso():
 def db_time(s):
     """'2026-10-15 18:33:37' (UTC) -> '2026-10-15T18:33:37Z'"""
     return s.replace(" ", "T") + "Z" if s and "T" not in s else s
-
-
-def load_json(path, default):
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return default
 
 
 def download_db():
@@ -68,8 +57,7 @@ def read_db(path):
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     rows = con.execute(
         """
-        SELECT p.message_id, p.video_id, p.detected_at,
-               c.channel_id, c.channel_name, c.handle, c.channel_url
+        SELECT p.message_id, p.video_id, p.detected_at, c.channel_id, c.channel_name, c.handle
         FROM gdchannel_posts p
         LEFT JOIN gdchannels c ON c.channel_id = p.channel_id
         WHERE p.chat_id = ?
@@ -79,132 +67,140 @@ def read_db(path):
     ).fetchall()
     con.close()
     posts, seen = [], set()
-    for mid, vid, at, cid, cname, handle, curl in rows:
+    for mid, vid, at, cid, cname, handle in rows:
         if not vid or vid in seen:
-            continue  # одно и то же видео выкладывали несколько раз: оставляем самый свежий пост
+            continue  # одно видео выкладывали несколько раз: берём самый свежий пост
         seen.add(vid)
-        posts.append({
-            "yt": vid,
-            "tg": mid,
-            "date": db_time(at),
-            "author": cname or "Неизвестный автор",
-            "channel": cid,
-            "handle": handle,
-        })
+        posts.append({"key": vid, "yt": vid, "tg": mid, "date": db_time(at),
+                      "author": cname or "", "channel": cid, "handle": handle})
     return posts
 
 
-def read_uploads():
-    """Видео, добавленные админами. Если репозитория ещё нет — просто пустой список."""
-    try:
-        r = requests.get(UPLOADS_URL, headers=UA, timeout=30)
-        if r.status_code == 404:
-            return {"videos": [], "hidden": []}
-        r.raise_for_status()
-        d = r.json()
-        return {"videos": d.get("videos", []), "hidden": d.get("hidden", [])}
-    except Exception as e:
-        print("  загрузки админов не прочитались:", e)
-        return {"videos": [], "hidden": []}
-
-
 def oembed(vid):
-    """Название и автор видео с YouTube. Возвращает (vid, данные или None если надо спросить позже)."""
+    """Название и автор с YouTube. None — YouTube не ответил, спросим в следующий раз."""
     url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={vid}&format=json"
     try:
         r = requests.get(url, headers=UA, timeout=20)
     except requests.RequestException:
-        return vid, None
+        return None
     if r.status_code == 200:
         try:
             j = r.json()
         except ValueError:
-            return vid, None
-        return vid, {"t": j.get("title", ""), "a": j.get("author_name", ""), "s": "ok"}
+            return None
+        return {"t": j.get("title", ""), "a": j.get("author_name", ""), "s": "ok"}
     if r.status_code in (401, 403):
-        return vid, {"t": "", "a": "", "s": "noembed"}  # видео есть, но встраивать запрещено
+        return {"t": "", "a": "", "s": "noembed"}  # видео есть, но встраивать запрещено
     if r.status_code in (400, 404):
-        return vid, {"t": "", "a": "", "s": "gone"}  # видео удалено или скрыто
-    return vid, None  # YouTube притормозил — попробуем в следующий раз
+        return {"t": "", "a": "", "s": "gone"}  # видео удалено или скрыто
+    return None
+
+
+def is_short(vid):
+    """Shorts открывается по адресу /shorts/ID, обычное видео оттуда перекидывает на /watch."""
+    try:
+        r = requests.head(f"https://www.youtube.com/shorts/{vid}", headers=UA, cookies=YT_COOKIES,
+                          allow_redirects=False, timeout=15)
+    except requests.RequestException:
+        return None
+    if r.status_code == 200:
+        return True
+    if r.status_code in (301, 302, 303, 307, 308):
+        loc = r.headers.get("location", "")
+        if "consent" in loc:
+            return None
+        return False
+    return None
+
+
+def lookup(vid, have):
+    """Узнать то, чего ещё нет в кэше: название и/или Shorts."""
+    info = dict(have or {})
+    if "s" not in info:
+        o = oembed(vid)
+        if o is None:
+            return vid, None
+        info.update(o)
+    if "sh" not in info and info.get("s") != "gone":
+        sh = is_short(vid)
+        if sh is not None:
+            info["sh"] = sh
+    info["at"] = now_iso()[:10]
+    return vid, info
 
 
 def main():
     meta = load_json(META, {})
+    posted = load_json(POSTED, {}).get("posted", {})
 
     db_path = download_db()
     posts = read_db(db_path)
     os.remove(db_path)
-    print(f"в базе: {len(posts)} видео канала")
+    print(f"в базе канала: {len(posts)} видео")
 
-    up = read_uploads()
-    hidden = set(up["hidden"])
-    in_db = {p["yt"] for p in posts}
-    for v in up["videos"]:
-        vid = v.get("yt")
-        if not vid or vid in in_db:
+    hidden = hidden_keys()
+    keys = {p["key"] for p in posts}
+    subs = approved_submissions()
+    for s in subs:
+        key = submission_key(s)
+        if key in keys:
             continue
+        keys.add(key)
+        tg = posted.get(key)
         posts.append({
-            "yt": vid,
-            "tg": None,
-            "date": v.get("added") or now_iso(),
-            "author": v.get("author") or "",
-            "channel": None,
-            "handle": None,
-            "title": v.get("title") or "",
-            "admin": True,
-            "uid": v.get("id"),
+            "key": key, "yt": s.get("yt_id"), "file": storage_url(s.get("file_path")), "thumb": storage_url(s.get("thumb_path")),
+            "title": s.get("title") or "", "author": s.get("author") or "", "desc": s.get("description") or "",
+            "date": s.get("reviewed_at") or s.get("created_at"), "short": bool(s.get("is_short")), "approved": True,
+            "tg": (tg.get("msg") if isinstance(tg, dict) else None),
         })
-        in_db.add(vid)
-    print(f"от админов: {sum(1 for p in posts if p.get('admin'))} видео")
+    print(f"одобренных заявок: {len(subs)}, скрыто модераторами: {len(hidden)}")
 
-    # узнаём названия новых видео (свежие в первую очередь)
-    todo = [p["yt"] for p in sorted(posts, key=lambda p: p["date"], reverse=True) if p["yt"] not in meta][:LOOKUPS_PER_RUN]
-    if todo:
-        print(f"узнаю названия: {len(todo)}")
-        done = 0
+    # что узнать на YouTube: сначала свежие, сначала то, чего совсем нет в кэше
+    need = [p["yt"] for p in sorted(posts, key=lambda p: p.get("date") or "", reverse=True)
+            if p.get("yt") and ("s" not in meta.get(p["yt"], {}) or "sh" not in meta.get(p["yt"], {}))
+            and meta.get(p["yt"], {}).get("s") != "gone"]
+    need.sort(key=lambda v: "s" in meta.get(v, {}))
+    need = need[:LOOKUPS_PER_RUN]
+    if need:
+        print(f"проверяю на YouTube: {len(need)}")
+        got = 0
         with ThreadPoolExecutor(max_workers=8) as pool:
-            for vid, info in pool.map(oembed, todo):
+            for vid, info in pool.map(lambda v: lookup(v, meta.get(v)), need):
                 if info:
-                    info["at"] = now_iso()[:10]
                     meta[vid] = info
-                    done += 1
-        print(f"  получено: {done}")
+                    got += 1
+        print(f"  получено: {got}")
 
     out = []
     for p in posts:
-        m = meta.get(p["yt"], {})
-        if m.get("s") == "gone" or p["yt"] in hidden:
+        m = meta.get(p.get("yt") or "", {})
+        if p["key"] in hidden or m.get("s") == "gone":
             continue
-        title = p.get("title") or m.get("t") or ""
-        author = p["author"] or m.get("a") or "Неизвестный автор"
-        item = {
-            "yt": p["yt"],
-            "title": title or f"Ворк от {author}",
-            "author": author,
-            "date": p["date"],
-        }
-        if p.get("tg"):
-            item["tg"] = p["tg"]
-        if p.get("channel"):
-            item["channel"] = p["channel"]
-        if p.get("handle"):
-            item["handle"] = p["handle"]
+        author = p.get("author") or m.get("a") or "Неизвестный автор"
+        item = {"key": p["key"], "title": p.get("title") or m.get("t") or f"Ворк от {author}",
+                "author": author, "date": p.get("date")}
+        for f in ("yt", "file", "thumb", "tg", "channel", "handle", "desc"):
+            if p.get(f):
+                item[f] = p[f]
+        if p.get("short") or m.get("sh"):
+            item["short"] = True
         if m.get("s") == "noembed":
             item["noembed"] = True
-        if p.get("admin"):
-            item["admin"] = True
+        if p.get("approved"):
+            item["approved"] = True
         out.append(item)
 
-    out.sort(key=lambda p: p["date"], reverse=True)
+    out.sort(key=lambda p: p.get("date") or "", reverse=True)
     authors = len({p.get("channel") or p["author"] for p in out})
+    shorts = sum(1 for p in out if p.get("short"))
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w", encoding="utf-8") as f:
-        json.dump({"channel": CHANNEL, "updated": now_iso(), "authors": authors, "posts": out},
+        json.dump({"channel": CHANNEL, "updated": now_iso(), "authors": authors, "shorts": shorts, "posts": out},
                   f, ensure_ascii=False, separators=(",", ":"))
     with open(META, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    print(f"готово: {len(out)} видео от {authors} авторов на сайте")
+    print(f"готово: {len(out)} видео ({shorts} Shorts) от {authors} авторов")
 
 
 if __name__ == "__main__":
