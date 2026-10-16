@@ -4,7 +4,9 @@
 Откуда берутся видео:
   1. SQL-база создателя канала: github.com/kilor231/rcgdtube-bd (gdchannels.db) —
      ворки с YouTube, которые выходили в канале, без пересылок.
-  2. Заявки зрителей, которые одобрили модераторы (таблица submissions в Supabase).
+  2. Открытая страница канала t.me/s/RCGDTUBE — собственные посты канала (не пересылки)
+     со ссылкой на YouTube. Так на сайт попадают авторы, которых нет в базе (scripts/tg_scan.py).
+  3. Заявки зрителей, которые одобрили модераторы (таблица submissions в Supabase).
 
 Для видео с YouTube узнаём название и проверяем, Shorts это или обычное видео.
 Ответы YouTube запоминаются в data/yt_meta.json, чтобы не спрашивать заново.
@@ -23,6 +25,7 @@ import requests
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import ROOT, UA, approved_submissions, hidden_keys, load_json, storage_url, submission_key  # noqa: E402
+from tg_scan import scan as scan_channel  # noqa: E402
 
 DB_URL = os.environ.get("DB_URL", "https://raw.githubusercontent.com/kilor231/rcgdtube-bd/main/gdchannels.db")
 MAIN_CHAT_ID = int(os.environ.get("MAIN_CHAT_ID", "-1002627414327"))  # канал РКГДTUBE внутри базы
@@ -65,6 +68,8 @@ def read_db(path):
         """,
         (MAIN_CHAT_ID,),
     ).fetchall()
+    handles = {h.lower(): (cid, name, h) for cid, name, h in
+               con.execute("SELECT channel_id, channel_name, handle FROM gdchannels WHERE handle IS NOT NULL")}
     con.close()
     posts, seen = [], set()
     for mid, vid, at, cid, cname, handle in rows:
@@ -73,7 +78,7 @@ def read_db(path):
         seen.add(vid)
         posts.append({"key": vid, "yt": vid, "tg": mid, "date": db_time(at),
                       "author": cname or "", "channel": cid, "handle": handle})
-    return posts
+    return posts, handles
 
 
 def oembed(vid):
@@ -88,7 +93,7 @@ def oembed(vid):
             j = r.json()
         except ValueError:
             return None
-        return {"t": j.get("title", ""), "a": j.get("author_name", ""), "s": "ok"}
+        return {"t": j.get("title", ""), "a": j.get("author_name", ""), "u": j.get("author_url", ""), "s": "ok"}
     if r.status_code in (401, 403):
         return {"t": "", "a": "", "s": "noembed"}  # видео есть, но встраивать запрещено
     if r.status_code in (400, 404):
@@ -134,9 +139,34 @@ def main():
     posted = load_json(POSTED, {}).get("posted", {})
 
     db_path = download_db()
-    posts = read_db(db_path)
+    posts, handles = read_db(db_path)
     os.remove(db_path)
     print(f"в базе канала: {len(posts)} видео")
+
+    # посты со страницы канала: подписи к ворку (название, автор, описание) и видео, которых нет в базе
+    scanned = scan_channel()
+    by_vid = {p["yt"]: p for p in posts}
+    added = 0
+    for mid, sp in sorted(scanned.items(), key=lambda x: int(x[0]), reverse=True):
+        vid = sp.get("yt")
+        if not vid:
+            continue
+        p = by_vid.get(vid)
+        if p is None:
+            p = {"key": vid, "yt": vid, "tg": int(mid), "date": sp.get("date"), "author": "", "scan": True}
+            posts.append(p)
+            by_vid[vid] = p
+            added += 1
+        elif p.get("tg") != int(mid):
+            continue  # то же видео в другом посте — подпись берём только из своего поста
+        if sp.get("author"):  # пост в формате канала «Название — Автор»
+            p["title"] = sp.get("title") or p.get("title")
+            p.setdefault("post_author", sp["author"])
+        if sp.get("desc"):
+            p["desc"] = sp["desc"]
+        if sp.get("short"):
+            p["short"] = True
+    print(f"со страницы канала добавлено видео, которых нет в базе: {added}")
 
     hidden = hidden_keys()
     keys = {p["key"] for p in posts}
@@ -176,7 +206,13 @@ def main():
         m = meta.get(p.get("yt") or "", {})
         if p["key"] in hidden or m.get("s") == "gone":
             continue
-        author = p.get("author") or m.get("a") or "Неизвестный автор"
+        if p.get("scan") and not p.get("channel"):
+            h = (m.get("u") or "").rstrip("/").rsplit("/", 1)[-1]
+            if h.startswith("@") and h.lower() in handles:
+                p["channel"], p["author"], p["handle"] = handles[h.lower()]
+            elif h.startswith("@"):
+                p["handle"] = h
+        author = p.get("author") or p.get("post_author") or m.get("a") or "Неизвестный автор"
         item = {"key": p["key"], "title": p.get("title") or m.get("t") or f"Ворк от {author}",
                 "author": author, "date": p.get("date")}
         for f in ("yt", "file", "thumb", "tg", "channel", "handle", "desc"):
