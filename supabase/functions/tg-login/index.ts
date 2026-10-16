@@ -7,6 +7,16 @@
 // Настройка функции: «Verify JWT» выключить.
 import { createClient } from "npm:@supabase/supabase-js@2.45.4";
 
+// Ключ с полными правами: новый (sb_secret_…) или старый service_role — что есть в проекте.
+function serviceKey(): string {
+  try {
+    const j = JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") || "{}");
+    const v = j.default || Object.values(j)[0];
+    if (typeof v === "string" && v) return v;
+  } catch (_) { /* старый формат */ }
+  return Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+}
+
 const cors = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -39,7 +49,7 @@ Deno.serve(async (req) => {
     if (!(await checkTelegram(data, botToken))) return json({ error: "Telegram не подтвердил вход. Попробуй ещё раз." }, 401);
     if (Date.now() / 1000 - Number(data.auth_date) > 86400) return json({ error: "Вход устарел. Нажми кнопку ещё раз." }, 401);
 
-    const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
+    const admin = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey(), {
       auth: { persistSession: false, autoRefreshToken: false },
     });
     const tgId = Number(data.id);
